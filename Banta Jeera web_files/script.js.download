@@ -1,0 +1,397 @@
+/**
+ * BANTA JEERA — PURE SCROLL ANIMATION & STORE ENGINE
+ * Smoothly scrubs 233 frames in the sticky top animation section,
+ * then seamlessly flows into the full store, custom 6-pack builder, and heritage sections.
+ */
+
+(function () {
+  'use strict';
+
+  const TOTAL_FRAMES = 233;
+  const FRAME_PREFIX = 'frames/ezgif-frame-';
+  const FRAME_EXT = '.jpg';
+
+  // --- STATE ---
+  const images = new Array(TOTAL_FRAMES + 1);
+  const loadedFlags = new Array(TOTAL_FRAMES + 1).fill(false);
+  let loadedCount = 0;
+  let currentRenderedFrame = -1;
+
+  let isAutoPlaying = false;
+  let autoPlayRaf = null;
+
+  let audioEnabled = false;
+  let audioCtx = null;
+  let fizzGain = null;
+
+  // --- DOM ELEMENTS ---
+  const canvas = document.getElementById('banta-canvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const animSection = document.getElementById('animation-section');
+  const scrollCue = document.getElementById('scroll-cue');
+
+  const topProgressFill = document.getElementById('top-progress-fill');
+  const hudFrameText = document.getElementById('hud-frame-text');
+  const hudPctText = document.getElementById('hud-pct-text');
+
+  const autoplayBtn = document.getElementById('autoplay-btn');
+  const autoplayIcon = document.getElementById('autoplay-icon');
+
+  const soundBtn = document.getElementById('sound-btn');
+  const fullscreenBtn = document.getElementById('fullscreen-btn');
+
+  function getFrameSrc(i) {
+    const pad = String(i).padStart(3, '0');
+    return `${FRAME_PREFIX}${pad}${FRAME_EXT}`;
+  }
+
+  // --- ASSET PRELOADER ---
+  function preloadFrames() {
+    // 1. Frame 1 renders immediately
+    const firstImg = new Image();
+    firstImg.src = getFrameSrc(1);
+    firstImg.onload = () => {
+      images[1] = firstImg;
+      loadedFlags[1] = true;
+      loadedCount++;
+      renderFrame(1);
+    };
+    images[1] = firstImg;
+
+    // 2. Stream all other 232 frames in parallel background batches
+    for (let i = 2; i <= TOTAL_FRAMES; i++) {
+      const img = new Image();
+      img.src = getFrameSrc(i);
+      img.onload = () => {
+        loadedFlags[i] = true;
+        loadedCount++;
+      };
+      img.onerror = () => {
+        loadedCount++;
+      };
+      images[i] = img;
+    }
+  }
+
+  // Fallback to nearest loaded frame
+  function getLoadedImage(index) {
+    const clamped = Math.max(1, Math.min(TOTAL_FRAMES, index));
+    if (loadedFlags[clamped] && images[clamped]?.complete) {
+      return images[clamped];
+    }
+    for (let b = clamped - 1; b >= 1; b--) {
+      if (loadedFlags[b] && images[b]?.complete) return images[b];
+    }
+    for (let f = clamped + 1; f <= TOTAL_FRAMES; f++) {
+      if (loadedFlags[f] && images[f]?.complete) return images[f];
+    }
+    return images[1] || null;
+  }
+
+  // --- CANVAS RESIZE & DRAW ---
+  function resizeCanvas() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    ctx.scale(dpr, dpr);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    currentRenderedFrame = -1;
+    updateFromScroll();
+  }
+
+  function renderFrame(frameNum) {
+    const frameIndex = Math.max(1, Math.min(TOTAL_FRAMES, Math.round(frameNum)));
+    if (frameIndex === currentRenderedFrame) return;
+
+    const img = getLoadedImage(frameIndex);
+    if (!img) return;
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const imgAspect = 1280 / 720;
+    const screenAspect = w / h;
+
+    let drawW, drawH, drawX, drawY;
+
+    // Cover mode: fill full screen maintaining crisp 16:9 ratio
+    if (screenAspect > imgAspect) {
+      drawW = w;
+      drawH = w / imgAspect;
+      drawX = 0;
+      drawY = (h - drawH) / 2;
+    } else {
+      drawH = h;
+      drawW = h * imgAspect;
+      drawX = (w - drawW) / 2;
+      drawY = 0;
+    }
+
+    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+    currentRenderedFrame = frameIndex;
+
+    updateHUD(frameIndex);
+  }
+
+  function updateHUD(frameIndex) {
+    const padded = String(frameIndex).padStart(3, '0');
+    const frac = (frameIndex - 1) / (TOTAL_FRAMES - 1);
+    const pct = Math.round(frac * 100);
+
+    if (hudFrameText) hudFrameText.textContent = `FRAME ${padded} / ${TOTAL_FRAMES}`;
+    if (hudPctText) hudPctText.textContent = `${pct}%`;
+    if (topProgressFill) topProgressFill.style.width = `${pct}%`;
+
+    // Dynamic audio modulation (effervescence rises during splash frames 40-140)
+    if (audioEnabled && fizzGain && audioCtx) {
+      let vol = 0.02;
+      if (frameIndex >= 40 && frameIndex <= 140) vol = 0.08;
+      else if (frameIndex > 140) vol = 0.04;
+      fizzGain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.08);
+    }
+  }
+
+  // --- SCROLL DRIVER (TRACKS POSITION IN ANIMATION SECTION) ---
+  function updateFromScroll() {
+    if (isAutoPlaying) return;
+    if (!animSection) return;
+
+    const rect = animSection.getBoundingClientRect();
+    const totalScrollable = animSection.offsetHeight - window.innerHeight;
+    if (totalScrollable <= 0) return;
+
+    const scrollInside = -rect.top;
+    const fraction = Math.max(0, Math.min(1, scrollInside / totalScrollable));
+    const targetFrame = Math.round(1 + fraction * (TOTAL_FRAMES - 1));
+
+    if (scrollCue) {
+      if (targetFrame > 10) {
+        scrollCue.classList.add('fade-out');
+      } else {
+        scrollCue.classList.remove('fade-out');
+      }
+    }
+
+    requestAnimationFrame(() => renderFrame(targetFrame));
+  }
+
+  // --- CONTROLS ---
+
+  // Auto-play toggle
+  function toggleAutoPlay(force) {
+    isAutoPlaying = typeof force === 'boolean' ? force : !isAutoPlaying;
+    if (isAutoPlaying) {
+      autoplayIcon.textContent = '⏸';
+      autoPlayLoop();
+    } else {
+      autoplayIcon.textContent = '▶';
+      if (autoPlayRaf) cancelAnimationFrame(autoPlayRaf);
+    }
+  }
+
+  function autoPlayLoop() {
+    if (!isAutoPlaying) return;
+    if (!animSection) return;
+
+    const totalScrollable = animSection.offsetHeight - window.innerHeight;
+    const currentScroll = window.scrollY || window.pageYOffset;
+    const step = window.innerHeight * 0.018;
+    const nextScroll = currentScroll + step;
+
+    if (nextScroll >= totalScrollable) {
+      window.scrollTo({ top: totalScrollable, behavior: 'instant' });
+      toggleAutoPlay(false);
+    } else {
+      window.scrollTo({ top: nextScroll, behavior: 'instant' });
+      updateFromScroll();
+      autoPlayRaf = requestAnimationFrame(autoPlayLoop);
+    }
+  }
+
+  autoplayBtn.addEventListener('click', () => toggleAutoPlay());
+
+  // Web Audio Synth
+  function initAudio() {
+    if (audioCtx) return;
+    try {
+      const AudioClass = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AudioClass();
+
+      const bufferSize = audioCtx.sampleRate * 2;
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = buffer;
+      noise.loop = true;
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 3400;
+      filter.Q.value = 2.0;
+
+      fizzGain = audioCtx.createGain();
+      fizzGain.gain.value = 0.04;
+
+      noise.connect(filter);
+      filter.connect(fizzGain);
+      fizzGain.connect(audioCtx.destination);
+      noise.start();
+    } catch (e) {}
+  }
+
+  soundBtn.addEventListener('click', () => {
+    audioEnabled = !audioEnabled;
+    if (audioEnabled) {
+      initAudio();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (fizzGain) fizzGain.gain.setTargetAtTime(0.04, audioCtx.currentTime, 0.1);
+      soundBtn.style.borderColor = 'rgba(245, 158, 11, 0.7)';
+      soundBtn.innerHTML = '<span>🔊</span>';
+    } else {
+      if (fizzGain && audioCtx) fizzGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+      soundBtn.style.borderColor = '';
+      soundBtn.innerHTML = '<span>🔇</span>';
+    }
+  });
+
+  // Fullscreen
+  fullscreenBtn.addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  });
+
+  // Keyboard navigation
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+      return; // Do not intercept typing in forms
+    }
+    if (e.code === 'Space') {
+      e.preventDefault();
+      toggleAutoPlay();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const nextFrame = Math.min(TOTAL_FRAMES, (currentRenderedFrame || 1) + 2);
+      const totalScrollable = animSection.offsetHeight - window.innerHeight;
+      window.scrollTo({ top: ((nextFrame - 1) / (TOTAL_FRAMES - 1)) * totalScrollable, behavior: 'instant' });
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const prevFrame = Math.max(1, (currentRenderedFrame || 1) - 2);
+      const totalScrollable = animSection.offsetHeight - window.innerHeight;
+      window.scrollTo({ top: ((prevFrame - 1) / (TOTAL_FRAMES - 1)) * totalScrollable, behavior: 'instant' });
+    }
+  });
+
+  // Event Listeners
+  window.addEventListener('scroll', updateFromScroll, { passive: true });
+  window.addEventListener('resize', resizeCanvas);
+
+  // Initialize
+  resizeCanvas();
+  preloadFrames();
+
+})();
+
+// --- LIVE TEXT EDITOR CMS ENGINE ---
+(function() {
+  const toggleBtn = document.getElementById('editor-toggle-btn');
+  const actionsPanel = document.getElementById('editor-actions-panel');
+  const saveBtn = document.getElementById('editor-save-btn');
+  const exportBtn = document.getElementById('editor-export-btn');
+  const resetBtn = document.getElementById('editor-reset-btn');
+  const toggleIcon = document.getElementById('editor-toggle-icon');
+  const toggleText = document.getElementById('editor-toggle-text');
+
+  if (!toggleBtn) return; // safety guard
+
+  let isEditingMode = false;
+  const STORAGE_KEY = 'bantajeera_cms_edits';
+
+  // On load: restore saved text from localStorage
+  function restoreSavedText() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      Object.entries(saved).forEach(([editId, text]) => {
+        const elem = document.querySelector(`[data-edit-id="${editId}"]`);
+        if (elem) elem.innerHTML = text;
+      });
+    } catch(e) { /* ignore parse errors */ }
+  }
+
+  function enableEditing() {
+    document.body.classList.add('editing-mode-active');
+    document.querySelectorAll('[data-edit-id]').forEach(el => {
+      el.contentEditable = 'true';
+    });
+    if (actionsPanel) actionsPanel.classList.remove('hidden');
+    if (toggleIcon) toggleIcon.textContent = '✅';
+    if (toggleText) toggleText.textContent = 'Editing Active';
+    isEditingMode = true;
+    if (window.showToast) window.showToast('✏️ Edit mode ON — click any text to edit it!');
+  }
+
+  function disableEditing() {
+    document.body.classList.remove('editing-mode-active');
+    document.querySelectorAll('[data-edit-id]').forEach(el => {
+      el.contentEditable = 'false';
+    });
+    if (actionsPanel) actionsPanel.classList.add('hidden');
+    if (toggleIcon) toggleIcon.textContent = '✏️';
+    if (toggleText) toggleText.textContent = 'Edit Text Mode';
+    isEditingMode = false;
+    if (window.showToast) window.showToast('👁️ Edit mode OFF');
+  }
+
+  toggleBtn.addEventListener('click', () => {
+    isEditingMode ? disableEditing() : enableEditing();
+  });
+
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      const edits = {};
+      document.querySelectorAll('[data-edit-id]').forEach(el => {
+        edits[el.dataset.editId] = el.innerHTML;
+      });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(edits));
+      if (window.showToast) window.showToast('💾 Changes saved! Will persist on refresh.');
+    });
+  }
+
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+      const blob = new Blob([html], { type: 'text/html' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'banta_jeera_updated.html';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      if (window.showToast) window.showToast('📥 HTML exported as banta_jeera_updated.html');
+    });
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (confirm('Reset ALL text changes back to original? This cannot be undone.')) {
+        localStorage.removeItem(STORAGE_KEY);
+        if (window.showToast) window.showToast('↺ Reset done — refreshing page to restore defaults...');
+        setTimeout(() => location.reload(), 1500);
+      }
+    });
+  }
+
+  // Restore any previously saved text immediately on page load
+  restoreSavedText();
+})();
